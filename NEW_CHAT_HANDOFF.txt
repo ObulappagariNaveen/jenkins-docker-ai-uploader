@@ -1,0 +1,62 @@
+Paste this into a new Codex or ChatGPT chat:
+
+I have a local repository for a Jenkins Log AI Explainer website at:
+
+/Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
+
+Goal:
+I want to explain downloaded Jenkins failure logs in simple plain text for new colleagues.
+
+Current approach:
+- Docker runs a small Python website.
+- Docker stores uploaded Jenkins logs and generated explanation files.
+- The Ollama app on my Mac runs the AI model.
+- Jenkins is not changed or touched.
+
+Recommended compose file:
+
+docker-compose.local-ollama.yml
+
+Website URL:
+
+http://localhost:8081
+
+Main files:
+- app.py
+- Dockerfile
+- docker-compose.local-ollama.yml
+- Modelfile.jenkins-failure-explainer
+- README.md
+
+How to start:
+
+cd /Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
+ollama list
+docker compose -f docker-compose.local-ollama.yml up -d --no-build
+
+If the Docker image is missing:
+
+docker compose -f docker-compose.local-ollama.yml up -d --build
+
+If the Ollama model is missing:
+
+ollama pull llama3.2:3b
+ollama create jenkins-failure-explainer -f Modelfile.jenkins-failure-explainer
+
+How to use:
+1. Download Jenkins build consoleText as .txt.
+2. Open http://localhost:8081.
+3. Upload the Jenkins log.
+4. Read the generated plain-English explanation.
+
+Where Docker stores files:
+- /data/input
+- /data/output
+- /data/archive
+
+Command to check stored files:
+
+docker exec jenkins-ai-web-local-ollama find /data -maxdepth 2 -type f -print
+
+Important:
+Do not delete or override the older local-folder scripts or older Docker setups in the parent folder. This repository is the newer website setup.

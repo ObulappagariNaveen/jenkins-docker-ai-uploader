@@ -1,0 +1,19 @@
+services:
+  web:
+    image: jenkins-docker-ai-uploader-web:latest
+    build: .
+    container_name: jenkins-ai-web-local-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: jenkins-failure-explainer
+      OLLAMA_TIMEOUT_SECONDS: "300"
+      DATA_DIR: /data
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./app.py:/app/app.py:ro
+      - jenkins-ai-data-local-ollama:/data
+
+volumes:
+  jenkins-ai-data-local-ollama:

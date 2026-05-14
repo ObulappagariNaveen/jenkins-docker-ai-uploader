@@ -1,0 +1,26 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jenkins-ai-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+
+  web:
+    build: .
+    container_name: jenkins-ai-web
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.2:3b
+      DATA_DIR: /data
+    ports:
+      - "8080:8080"
+    volumes:
+      - jenkins-ai-data:/data
+
+volumes:
+  ollama-models:
+  jenkins-ai-data:
