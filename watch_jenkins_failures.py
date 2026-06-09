@@ -7,12 +7,14 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from html import unescape
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import app
 
@@ -67,6 +69,72 @@ def safe_log_name(job_name: str, build_number: int) -> str:
     return f"jenkins-auto-{safe_job}-#{build_number}.txt"
 
 
+def safe_support_name(job_name: str, build_number: int, file_name: str) -> str:
+    safe_job = re.sub(r"[^A-Za-z0-9_.-]+", "_", job_name)
+    safe_file = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(file_name).name or "input.csv")
+    return f"jenkins-auto-{safe_job}-#{build_number}-{safe_file}"
+
+
+def input_parameter_links(parameters_html: str, parameters_url: str) -> list[tuple[str, str]]:
+    links: list[tuple[str, str]] = []
+    for match in re.finditer(r'href=["\']([^"\']*parameter/[^"\']+\.csv(?:/[^"\']*)?)["\']', parameters_html, re.I):
+        href = unescape(match.group(1))
+        if "*view*" in href:
+            continue
+        file_name = Path(href.rstrip("/").split("/")[-1]).name
+        links.append((file_name, urljoin(parameters_url, href)))
+    return links
+
+
+def fetch_input_parameter_csv(
+    *,
+    build_url: str,
+    headers: dict[str, str],
+    timeout: int,
+) -> tuple[str, str] | None:
+    parameters_url = f"{build_url.rstrip('/')}/parameters/"
+    try:
+        parameters_html = request_text(parameters_url, headers, timeout)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    links = input_parameter_links(parameters_html, parameters_url)
+    if not links:
+        return None
+    file_name, download_url = links[0]
+    return file_name, request_text(download_url, headers, timeout)
+
+
+def save_input_csv(job_name: str, build_number: int, input_csv: tuple[str, str] | None) -> Path | None:
+    if input_csv is None:
+        return None
+    file_name, csv_text = input_csv
+    support_path = app.SUPPORT_DIR / safe_support_name(job_name, build_number, file_name)
+    support_path.write_text(csv_text, encoding="utf-8")
+    return support_path
+
+
+def input_csv_has_validation_issues(job_name: str, input_csv: tuple[str, str] | None) -> bool:
+    if input_csv is None:
+        return False
+    _, csv_text = input_csv
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
+            handle.write(csv_text)
+            temp_path = Path(handle.name)
+        return app.validate_csv_against_reference(job_name, temp_path).has_issues
+    except Exception:
+        return True
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def mark_processed(state: dict[str, object], job_name: str, build_number: int, result: str, output_name: str = "") -> None:
     processed = state.setdefault("processed", {})
     if not isinstance(processed, dict):
@@ -111,13 +179,16 @@ def explain_failed_build(
     job_name: str,
     build_number: int,
     result: str = "FAILURE",
+    build_url: str = "",
 ) -> str:
     console_url = f"{job_url(base_url, job_name)}/{build_number}/consoleText"
     log_text = request_text(console_url, headers, timeout)
     app.ensure_dirs()
+    input_csv = fetch_input_parameter_csv(build_url=build_url or f"{job_url(base_url, job_name)}/{build_number}/", headers=headers, timeout=timeout)
     log_path = app.INPUT_DIR / safe_log_name(job_name, build_number)
     log_path.write_text(log_text, encoding="utf-8")
-    output_path = app.process_log(log_path, job_name, None)
+    support_path = save_input_csv(job_name, build_number, input_csv)
+    output_path = app.process_log(log_path, job_name, support_path)
     mark_processed(state, job_name, build_number, result, output_path.name)
     return output_path.name
 
@@ -142,6 +213,7 @@ def check_job(
         return f"{job_name} #{build_number}: still building"
 
     result = str(data.get("result") or "UNKNOWN")
+    build_url = str(data.get("url") or f"{job_url(base_url, job_name)}/{build_number}/")
     if not force and already_processed(state, job_name, build_number):
         return f"{job_name} #{build_number}: {result} already processed"
 
@@ -151,16 +223,22 @@ def check_job(
     if result != "FAILURE":
         console_url = f"{job_url(base_url, job_name)}/{build_number}/consoleText"
         log_text = request_text(console_url, headers, timeout)
-        if not log_has_failure_evidence(log_text):
-            mark_processed(state, job_name, build_number, result)
-            return f"{job_name} #{build_number}: {result}, no failure evidence in console, skipped"
+        input_csv = fetch_input_parameter_csv(build_url=build_url, headers=headers, timeout=timeout)
+        has_log_evidence = log_has_failure_evidence(log_text)
+        has_csv_issues = input_csv_has_validation_issues(job_name, input_csv)
+        if not has_log_evidence and not has_csv_issues:
+            stored_result = f"{result}_VALID_INPUT" if input_csv is not None else result
+            mark_processed(state, job_name, build_number, stored_result)
+            return f"{job_name} #{build_number}: {result}, input CSV valid and no failure evidence, skipped"
 
         app.ensure_dirs()
         log_path = app.INPUT_DIR / safe_log_name(job_name, build_number)
         log_path.write_text(log_text, encoding="utf-8")
-        output_path = app.process_log(log_path, job_name, None)
-        mark_processed(state, job_name, build_number, f"{result}_WITH_FAILURE_EVIDENCE", output_path.name)
-        return f"{job_name} #{build_number}: {result} with failure evidence explained -> {output_path.name}"
+        support_path = save_input_csv(job_name, build_number, input_csv)
+        output_path = app.process_log(log_path, job_name, support_path)
+        stored_result = f"{result}_WITH_INPUT_OR_FAILURE_EVIDENCE"
+        mark_processed(state, job_name, build_number, stored_result, output_path.name)
+        return f"{job_name} #{build_number}: {stored_result} explained -> {output_path.name}"
 
     output_name = explain_failed_build(
         base_url=base_url,
@@ -170,6 +248,7 @@ def check_job(
         job_name=job_name,
         build_number=build_number,
         result=result,
+        build_url=build_url,
     )
     return f"{job_name} #{build_number}: FAILURE explained -> {output_name}"
 
