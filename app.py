@@ -3035,9 +3035,10 @@ class Handler(BaseHTTPRequestHandler):
                 f"<td>{stat.st_size} bytes</td>"
                 "</tr>"
             )
+        empty_row = '<tr><td colspan="4" class="muted">No outputs yet.</td></tr>'
         table = (
             "<table><thead><tr><th>Output File</th><th>Jenkins Job</th><th>Created</th><th>Size</th></tr></thead>"
-            f"<tbody>{''.join(rows) or '<tr><td colspan=\"4\" class=\"muted\">No outputs yet.</td></tr>'}</tbody></table>"
+            f"<tbody>{''.join(rows) or empty_row}</tbody></table>"
         )
         self.send_html("Results", f'<section class="panel"><h2>Results</h2>{table}</section>')
 
