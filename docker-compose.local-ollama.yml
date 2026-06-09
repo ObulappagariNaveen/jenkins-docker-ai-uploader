@@ -13,6 +13,8 @@ services:
       - "8081:8080"
     volumes:
       - ./app.py:/app/app.py:ro
+      - ./watch_jenkins_failures.py:/app/watch_jenkins_failures.py:ro
+      - ./reference_formats:/app/reference_formats:ro
       - jenkins-ai-data-local-ollama:/data
 
 volumes:

@@ -3,3 +3,4 @@ __pycache__/
 .DS_Store
 docker-data-export/
 *.log
+jenkins-watcher-mac-state.json
