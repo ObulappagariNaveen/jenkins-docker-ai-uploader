@@ -170,6 +170,112 @@ def log_has_failure_evidence(log_text: str) -> bool:
     return any(re.search(pattern, log_text) for pattern in patterns)
 
 
+def output_field(text: str, label: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(label)}:\n(.*?)(?=\n[A-Z][A-Za-z /-]*:\n|\Z)", text)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def output_metadata(text: str, label: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(label)}:\s*(.+)$", text)
+    return match.group(1).strip() if match else ""
+
+
+def compact_lines(text: str, *, limit: int = 6) -> list[str]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= limit:
+        return lines
+    return lines[:limit] + [f"... {len(lines) - limit} more line(s) in archived output file."]
+
+
+def has_actionable_issue(text: str) -> bool:
+    issue = output_field(text, "Issue")
+    problem = output_field(text, "Problem found")
+    no_issue_patterns = (
+        "No failure detected",
+        "No problem found",
+        "No CSV format fix is needed",
+    )
+    combined = f"{issue}\n{problem}"
+    return not any(pattern in combined for pattern in no_issue_patterns)
+
+
+def print_explanation_summary(output_names: list[str]) -> None:
+    output_paths = [app.OUTPUT_DIR / name for name in output_names if name]
+    output_paths = [path for path in output_paths if path.exists()]
+
+    print("", flush=True)
+    print("================ AI EXPLANATION SUMMARY ================", flush=True)
+    if not output_paths:
+        print("No AI explanation output generated in this run.", flush=True)
+        print("========================================================", flush=True)
+        return
+
+    issue_count = 0
+    no_issue_count = 0
+    for output_path in output_paths:
+        text = output_path.read_text(encoding="utf-8", errors="replace")
+        if has_actionable_issue(text):
+            issue_count += 1
+        else:
+            no_issue_count += 1
+
+    print(f"Jobs with issues: {issue_count}", flush=True)
+    print(f"Jobs checked with no issue output: {no_issue_count}", flush=True)
+
+    for output_path in output_paths:
+        text = output_path.read_text(encoding="utf-8", errors="replace")
+        job = output_metadata(text, "Detected Jenkins job") or output_metadata(text, "Selected Jenkins job") or "Unknown"
+        status = output_metadata(text, "Detected Jenkins status") or "Unknown"
+        log_file = output_metadata(text, "Jenkins log file")
+        build = "Unknown"
+        build_match = re.search(r"#(\d+)", log_file)
+        if build_match:
+            build = f"#{build_match.group(1)}"
+
+        if not has_actionable_issue(text):
+            continue
+
+        print("", flush=True)
+        print("--------------------------------------------------------", flush=True)
+        print(f"JOB: {job}", flush=True)
+        print(f"BUILD: {build}", flush=True)
+        print(f"STATUS: {status}", flush=True)
+        print(f"OUTPUT FILE: {output_path.name}", flush=True)
+
+        issue = output_field(text, "Issue")
+        failed = output_field(text, "Failed row/column")
+        fix = output_field(text, "Possible fix") or output_field(text, "Fix")
+        problem = output_field(text, "Problem found")
+
+        if issue:
+            print("", flush=True)
+            print("ISSUE:", flush=True)
+            for line in compact_lines(issue, limit=4):
+                print(line, flush=True)
+        if failed:
+            print("", flush=True)
+            print("WHERE:", flush=True)
+            for line in compact_lines(failed, limit=8):
+                print(line, flush=True)
+        elif problem:
+            print("", flush=True)
+            print("PROBLEM:", flush=True)
+            for line in compact_lines(problem, limit=8):
+                print(line, flush=True)
+        if fix:
+            print("", flush=True)
+            print("FIX:", flush=True)
+            for line in compact_lines(fix, limit=8):
+                print(line, flush=True)
+
+    if issue_count == 0:
+        print("", flush=True)
+        print("No actionable issues found in generated AI outputs.", flush=True)
+    print("========================================================", flush=True)
+
+
 def explain_failed_build(
     *,
     base_url: str,
@@ -259,6 +365,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Check once and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Do not download or explain builds.")
     parser.add_argument("--force", action="store_true", help="Re-check latest build even if state says it was processed.")
+    parser.add_argument("--summary", action="store_true", help="Print a clean per-job explanation summary after checking.")
     parser.add_argument("--jobs", nargs="*", help="Optional job names. Default: all reference format jobs.")
     parser.add_argument("--timeout", type=int, default=30, help="Jenkins request timeout seconds. Default: 30.")
     parser.add_argument(
@@ -271,6 +378,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_once(args: argparse.Namespace, headers: dict[str, str], state: dict[str, object]) -> None:
     jobs = args.jobs or app.reference_jobs()
+    output_names: list[str] = []
     for job_name in jobs:
         try:
             message = check_job(
@@ -287,7 +395,12 @@ def run_once(args: argparse.Namespace, headers: dict[str, str], state: dict[str,
         except Exception as error:
             message = f"{job_name}: {error}"
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+        output_match = re.search(r"explained -> (\S+)", message)
+        if output_match:
+            output_names.append(output_match.group(1))
     save_state(state)
+    if args.summary:
+        print_explanation_summary(output_names)
 
 
 def main() -> int:
