@@ -213,16 +213,10 @@ def print_explanation_summary(output_names: list[str]) -> None:
         return
 
     issue_count = 0
-    no_issue_count = 0
     for output_path in output_paths:
         text = output_path.read_text(encoding="utf-8", errors="replace")
         if has_actionable_issue(text):
             issue_count += 1
-        else:
-            no_issue_count += 1
-
-    print(f"Jobs with issues: {issue_count}", flush=True)
-    print(f"Jobs checked with no issue output: {no_issue_count}", flush=True)
 
     for output_path in output_paths:
         text = output_path.read_text(encoding="utf-8", errors="replace")
@@ -242,7 +236,6 @@ def print_explanation_summary(output_names: list[str]) -> None:
         print(f"JOB: {job}", flush=True)
         print(f"BUILD: {build}", flush=True)
         print(f"STATUS: {status}", flush=True)
-        print(f"OUTPUT FILE: {output_path.name}", flush=True)
 
         issue = output_field(text, "Issue")
         failed = output_field(text, "Failed row/column")

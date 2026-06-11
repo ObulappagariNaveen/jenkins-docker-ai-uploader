@@ -1997,6 +1997,9 @@ def missing_input_file_name(log_text: str) -> str:
     patterns = (
         r"(?im)cannot stat ['\"]([^'\"]+\.csv)['\"]:\s+No such file or directory",
         r"(?im)([A-Za-z0-9_. -]+\.csv):\s+No such file or directory",
+        r"(?im)No such file or directory:\s*['\"]([^'\"]+\.csv)['\"]",
+        r"(?im)FileNotFoundError:.*No such file or directory:\s*['\"]([^'\"]+\.csv)['\"]",
+        r"(?im)(?:cp|mv|cat|ls):\s+cannot (?:stat|access) ['\"]?([^'\"\n]+\.csv)['\"]?",
     )
     for pattern in patterns:
         match = re.search(pattern, log_text)
@@ -2005,24 +2008,39 @@ def missing_input_file_name(log_text: str) -> str:
     return ""
 
 
-def missing_input_file_explanation(log_text: str) -> str:
+def log_indicates_missing_input_file(log_text: str) -> bool:
+    patterns = (
+        r"(?i)no file (?:was )?uploaded",
+        r"(?i)input file .*not uploaded",
+        r"(?i)uploaded file .*not found",
+        r"(?i)file parameter .*empty",
+        r"(?i)No such file or directory",
+        r"(?i)cannot stat",
+        r"(?i)cannot access",
+        r"(?i)FileNotFoundError",
+    )
+    return any(re.search(pattern, log_text) for pattern in patterns)
+
+
+def missing_input_file_explanation(log_text: str, *, assume_missing: bool = False) -> str:
     missing_file = missing_input_file_name(log_text)
-    if not missing_file:
+    if not missing_file and not assume_missing and not log_indicates_missing_input_file(log_text):
         return ""
+    expected_file = missing_file or "the required Jenkins input CSV"
 
     return "\n".join(
         [
             "Issue:",
-            "Jenkins could not find the input CSV file.",
+            "The Jenkins input CSV was not uploaded or could not be found.",
             "",
             "Failed row/column:",
             "Not applicable. Jenkins failed before reading CSV rows.",
             "",
             "Simple reason:",
-            f"The job expected {missing_file}, but that file was not uploaded or the file name did not match.",
+            f"The job expected {expected_file}, but Jenkins did not receive a readable CSV file for this run.",
             "",
             "Possible fix:",
-            f"Upload the required CSV in Jenkins with the exact file name {missing_file}, then run the job again.",
+            "Upload the required CSV file in Jenkins, then run the job again.",
             "",
             "Confidence:",
             "High",
@@ -2512,7 +2530,15 @@ def process_log(path: Path, job_hint: str = "", support_path: Path | None = None
     validation_report = validate_csv_against_reference(job_hint, support_path) if support_path is not None else None
     file_analysis = validation_report.prompt_summary() if validation_report is not None else ""
 
-    missing_file_explanation = missing_input_file_explanation(log_text) if support_path is None else ""
+    should_assume_missing_input = (
+        support_path is None
+        and bool(job_hint)
+        and status_line(log_text) == "FAILURE"
+        and not log_failure_issues(log_text)
+    )
+    missing_file_explanation = (
+        missing_input_file_explanation(log_text, assume_missing=should_assume_missing_input) if support_path is None else ""
+    )
     log_explanation = deterministic_log_explanation(log_text)
     existing_location = existing_location_explanation(log_text)
     existing_pincode = existing_pincode_explanation(log_text)
