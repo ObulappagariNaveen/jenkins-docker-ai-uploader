@@ -2048,6 +2048,31 @@ def missing_input_file_explanation(log_text: str, *, assume_missing: bool = Fals
     )
 
 
+def missing_required_column_from_log_explanation(log_text: str) -> str:
+    match = re.search(r"(?im)^KeyError:\s*['\"]([^'\"]+)['\"]", log_text)
+    if not match:
+        return ""
+    column = match.group(1).strip()
+    return "\n".join(
+        [
+            "Issue:",
+            f"The uploaded CSV is missing the required column {column}.",
+            "",
+            "Failed row/column:",
+            f"Column {column} was not found when the Jenkins script tried to read the uploaded CSV.",
+            "",
+            "Simple reason:",
+            f"The Jenkins script expects a header named {column}, but the uploaded file does not have that exact column name.",
+            "",
+            "Possible fix:",
+            f"Add or rename the header to exactly {column}, then run the job again.",
+            "",
+            "Confidence:",
+            "High",
+        ]
+    )
+
+
 def location_before(log_text: str, position: int) -> str:
     matches = list(re.finditer(r"(?im)^Iteration:\s*\d+/\d+\s*\|\s*Location:\s*(.+)$", log_text[:position]))
     return matches[-1].group(1).strip() if matches else "Unknown"
@@ -2534,11 +2559,13 @@ def process_log(path: Path, job_hint: str = "", support_path: Path | None = None
         support_path is None
         and bool(job_hint)
         and status_line(log_text) == "FAILURE"
+        and log_indicates_missing_input_file(log_text)
         and not log_failure_issues(log_text)
     )
     missing_file_explanation = (
         missing_input_file_explanation(log_text, assume_missing=should_assume_missing_input) if support_path is None else ""
     )
+    missing_required_column = missing_required_column_from_log_explanation(log_text)
     log_explanation = deterministic_log_explanation(log_text)
     existing_location = existing_location_explanation(log_text)
     existing_pincode = existing_pincode_explanation(log_text)
@@ -2546,7 +2573,11 @@ def process_log(path: Path, job_hint: str = "", support_path: Path | None = None
     invalid_city = invalid_city_explanation(log_text)
     invalid_admin_name = invalid_admin_name_explanation(log_text)
     network_metadata_id = network_metadata_id_explanation(log_text)
-    if missing_file_explanation:
+    if validation_report is not None and validation_report.has_issues:
+        explanation = validation_report.plain_english_explanation()
+    elif missing_required_column:
+        explanation = missing_required_column
+    elif missing_file_explanation:
         explanation = missing_file_explanation
     elif log_explanation:
         explanation = log_explanation
@@ -2560,8 +2591,6 @@ def process_log(path: Path, job_hint: str = "", support_path: Path | None = None
         explanation = duplicate_admin_contact
     elif invalid_city:
         explanation = invalid_city
-    elif validation_report is not None and validation_report.has_issues:
-        explanation = validation_report.plain_english_explanation()
     elif invalid_admin_name:
         explanation = invalid_admin_name
     elif status_line(log_text) == "SUCCESS" and validation_report is not None and not validation_report.has_issues:

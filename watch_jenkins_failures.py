@@ -72,17 +72,26 @@ def safe_log_name(job_name: str, build_number: int) -> str:
 def safe_support_name(job_name: str, build_number: int, file_name: str) -> str:
     safe_job = re.sub(r"[^A-Za-z0-9_.-]+", "_", job_name)
     safe_file = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(file_name).name or "input.csv")
+    if "." not in safe_file:
+        safe_file = f"{safe_file}.csv"
     return f"jenkins-auto-{safe_job}-#{build_number}-{safe_file}"
 
 
 def input_parameter_links(parameters_html: str, parameters_url: str) -> list[tuple[str, str]]:
     links: list[tuple[str, str]] = []
-    for match in re.finditer(r'href=["\']([^"\']*parameter/[^"\']+\.csv(?:/[^"\']*)?)["\']', parameters_html, re.I):
+    seen: set[str] = set()
+    for match in re.finditer(r'href=["\']([^"\']*parameter/[^"\']+)["\']', parameters_html, re.I):
         href = unescape(match.group(1))
         if "*view*" in href:
             continue
         file_name = Path(href.rstrip("/").split("/")[-1]).name
-        links.append((file_name, urljoin(parameters_url, href)))
+        if not file_name or "." in file_name and not file_name.lower().endswith(".csv"):
+            continue
+        download_url = urljoin(parameters_url, href)
+        if download_url in seen:
+            continue
+        seen.add(download_url)
+        links.append((file_name, download_url))
     return links
 
 
