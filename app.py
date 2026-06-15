@@ -2113,6 +2113,25 @@ def log_failure_issues(log_text: str) -> list[dict[str, str]]:
         if "[FAILED]" not in line:
             continue
 
+        pincode_not_found_match = re.search(r"Pincodes?\s+([0-9,\s]+)\s+are\s+not\s+found", line, re.I)
+        if pincode_not_found_match:
+            pincodes = ", ".join(
+                pincode
+                for pincode in re.split(r"[,\s]+", pincode_not_found_match.group(1).strip())
+                if pincode
+            )
+            add_log_issue(
+                issues,
+                {
+                    "location": current_location,
+                    "field": "pincode",
+                    "problem": f"pincode {pincodes} is not available in the backend pincode table",
+                    "detail": f"pincode {pincodes}",
+                    "fix": "Add or activate the pincode in the backend pincode table, then retry the upload.",
+                },
+            )
+            continue
+
         client_match = re.search(r"clientLocationName\s+['\"]([^'\"]+)['\"]\s+already present in system", line, re.I)
         if client_match:
             add_log_issue(
