@@ -3,6 +3,12 @@ pipeline {
         label 'jenkins-infra-prd-jenkins-agent'
     }
 
+    parameters {
+        string(name: 'WATCHER_JENKINS_USER', defaultValue: 'obulappagarinaveen', description: 'Jenkins user whose API token the watcher uses.')
+        string(name: 'WATCHER_TOKEN_CREDENTIALS_ID', defaultValue: 'jenkins-api-token-for-ai-watcher', description: 'Jenkins secret-text credential holding that API token.')
+        string(name: 'WATCHER_BRANCH', defaultValue: 'main', description: 'Branch of this repository to run the watcher from.')
+    }
+
     stages {
         stage('Find source Jenkins job') {
             steps {
@@ -30,7 +36,7 @@ pipeline {
             }
             steps {
                 container('devops-tools') {
-                    git branch: 'main',
+                    git branch: params.WATCHER_BRANCH ?: 'main',
                         url: 'https://github.com/ObulappagariNaveen/jenkins-docker-ai-uploader.git'
                 }
             }
@@ -43,11 +49,11 @@ pipeline {
             steps {
                 container('devops-tools') {
                     withCredentials([
-                        string(credentialsId: 'jenkins-api-token-for-ai-watcher', variable: 'JENKINS_API_TOKEN')
+                        string(credentialsId: params.WATCHER_TOKEN_CREDENTIALS_ID ?: 'jenkins-api-token-for-ai-watcher', variable: 'JENKINS_API_TOKEN')
                     ]) {
                         sh '''
                         set +x
-                        export JENKINS_USER="obulappagarinaveen"
+                        export JENKINS_USER="${WATCHER_JENKINS_USER:-obulappagarinaveen}"
                         export JENKINS_BASE_URL="https://jenkins.prd.valmo.in/job/support/job/log10/job/Regular_tasks"
                         export DATA_DIR="$WORKSPACE/jenkins-ai-data"
 

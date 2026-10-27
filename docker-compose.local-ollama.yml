@@ -6,15 +6,14 @@ services:
     restart: unless-stopped
     environment:
       OLLAMA_URL: http://host.docker.internal:11434
-      OLLAMA_MODEL: jenkins-failure-explainer
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-jenkins-failure-explainer}
       OLLAMA_TIMEOUT_SECONDS: "300"
       DATA_DIR: /data
+      APP_ACCESS_TOKEN: ${APP_ACCESS_TOKEN:-}
+      RETENTION_DAYS: ${RETENTION_DAYS:-0}
     ports:
       - "8081:8080"
     volumes:
-      - ./app.py:/app/app.py:ro
-      - ./watch_jenkins_failures.py:/app/watch_jenkins_failures.py:ro
-      - ./reference_formats:/app/reference_formats:ro
       - jenkins-ai-data-local-ollama:/data
 
 volumes:

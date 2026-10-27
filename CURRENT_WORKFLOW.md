@@ -47,8 +47,8 @@ docker-compose.local-ollama.yml
 Start the website:
 
 ```bash
-cd /Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
-docker compose -f docker-compose.local-ollama.yml up -d --no-build
+cd ~/jenkins-docker-ai-uploader
+docker compose -f docker-compose.local-ollama.yml up -d --build
 ```
 
 If the image is missing:

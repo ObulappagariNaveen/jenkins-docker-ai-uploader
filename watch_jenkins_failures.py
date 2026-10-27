@@ -36,10 +36,14 @@ def auth_header() -> dict[str, str]:
     return {"Authorization": f"Basic {encoded}"}
 
 
-def request_text(url: str, headers: dict[str, str], timeout: int) -> str:
+def request_bytes(url: str, headers: dict[str, str], timeout: int) -> bytes:
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read().decode("utf-8", errors="replace")
+        return response.read()
+
+
+def request_text(url: str, headers: dict[str, str], timeout: int) -> str:
+    return request_bytes(url, headers, timeout).decode("utf-8", errors="replace")
 
 
 def request_json(url: str, headers: dict[str, str], timeout: int) -> dict[str, object]:
@@ -100,7 +104,7 @@ def fetch_input_parameter_csv(
     build_url: str,
     headers: dict[str, str],
     timeout: int,
-) -> tuple[str, str] | None:
+) -> tuple[str, bytes] | None:
     parameters_url = f"{build_url.rstrip('/')}/parameters/"
     try:
         parameters_html = request_text(parameters_url, headers, timeout)
@@ -112,26 +116,26 @@ def fetch_input_parameter_csv(
     if not links:
         return None
     file_name, download_url = links[0]
-    return file_name, request_text(download_url, headers, timeout)
+    return file_name, request_bytes(download_url, headers, timeout)
 
 
-def save_input_csv(job_name: str, build_number: int, input_csv: tuple[str, str] | None) -> Path | None:
+def save_input_csv(job_name: str, build_number: int, input_csv: tuple[str, bytes] | None) -> Path | None:
     if input_csv is None:
         return None
-    file_name, csv_text = input_csv
+    file_name, csv_bytes = input_csv
     support_path = app.SUPPORT_DIR / safe_support_name(job_name, build_number, file_name)
-    support_path.write_text(csv_text, encoding="utf-8")
+    support_path.write_bytes(csv_bytes)
     return support_path
 
 
-def input_csv_has_validation_issues(job_name: str, input_csv: tuple[str, str] | None) -> bool:
+def input_csv_has_validation_issues(job_name: str, input_csv: tuple[str, bytes] | None) -> bool:
     if input_csv is None:
         return False
-    _, csv_text = input_csv
+    _, csv_bytes = input_csv
     temp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
-            handle.write(csv_text)
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as handle:
+            handle.write(csv_bytes)
             temp_path = Path(handle.name)
         return app.validate_csv_against_reference(job_name, temp_path).has_issues
     except Exception:

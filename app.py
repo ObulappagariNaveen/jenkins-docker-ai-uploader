@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import html
+import base64
 import csv
+import hmac
+import html
 import difflib
 import io
 import json
 import os
 import re
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.request
-import zipfile
+import uuid
 from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default
@@ -20,7 +23,6 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
-from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 
@@ -37,11 +39,15 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
+MAX_CONCURRENT_OLLAMA = max(1, int(os.getenv("MAX_CONCURRENT_OLLAMA", "2")))
+OLLAMA_QUEUE_WAIT_SECONDS = int(os.getenv("OLLAMA_QUEUE_WAIT_SECONDS", "60"))
+APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "").strip()
+RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "0"))
+OLLAMA_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_OLLAMA)
 APP_TIMEZONE_NAME = os.getenv("APP_TIMEZONE", "Asia/Kolkata")
 APP_TIMEZONE = ZoneInfo(APP_TIMEZONE_NAME)
 
-USER_ROLE_COLUMNS = ("User_contact_number", "Role")
-USER_ROLE_VALUES = {"FE", "ADMIN", "AM"}
 TITAN_ENTITY_TYPES = {"ACTIVATE", "DEACTIVATE", "AADHAR", "PANCARD"}
 DYNAMIC_VALUE_REFERENCE_JOBS = {
     "fmsc_migration",
@@ -155,7 +161,8 @@ def safe_filename(name: str) -> str:
 def output_name(input_name: str) -> str:
     stem = Path(input_name).stem.replace(" ", "_").replace("(", "").replace(")", "")
     stem = re.sub(r"[^A-Za-z0-9_.#-]+", "_", stem)
-    return f"ollama_failure_reason_{stem}.txt"
+    stamp = datetime.now(APP_TIMEZONE).strftime("%Y%m%d-%H%M%S")
+    return f"ollama_failure_reason_{stem}_{stamp}_{uuid.uuid4().hex[:6]}.txt"
 
 
 def read_text(path: Path) -> str:
@@ -166,8 +173,9 @@ def save_upload(part: object, folder: Path, fallback_name: str) -> Path:
     filename = safe_filename(part.get_filename() or fallback_name)
     output_path = folder / filename
     if output_path.exists():
-        output_path = folder / f"{int(time.time())}-{filename}"
-    output_path.write_bytes(part.get_payload(decode=True) or b"")
+        output_path = folder / f"{uuid.uuid4().hex[:8]}-{filename}"
+    with output_path.open("xb") as handle:
+        handle.write(part.get_payload(decode=True) or b"")
     return output_path
 
 
@@ -192,17 +200,6 @@ def csv_rows_from_text(text: str) -> list[list[str]]:
         return list(csv.reader(io.StringIO(text, newline=""), dialect))
     except (csv.Error, ValueError):
         return list(csv.reader(io.StringIO(text, newline=""), csv.excel))
-
-
-def looks_like_csv_rows(rows: list[list[str]]) -> bool:
-    non_empty_rows = [row for row in rows[:8] if any(cell.strip() for cell in row)]
-    if len(non_empty_rows) < 2:
-        return False
-    header_width = len(non_empty_rows[0])
-    if header_width < 2:
-        return False
-    matching_rows = sum(1 for row in non_empty_rows[1:] if len(row) == header_width)
-    return matching_rows >= 1
 
 
 def reference_jobs() -> list[str]:
@@ -1699,212 +1696,6 @@ def mask_value(value: str) -> str:
     return f"{value[:2]}***{value[-2:]}"
 
 
-def looks_like_user_role_headers(headers: list[str]) -> bool:
-    normalized = [re.sub(r"[^a-z0-9]+", "", header.lower()) for header in headers]
-    role_like = {"role", "roel"}
-    contact_like = {
-        "usercontactnumber",
-        "usercontact",
-        "usernumber",
-    }
-    has_role = any(header in role_like for header in normalized)
-    has_user_contact = any(header in contact_like or ("user" in header and "contact" in header) for header in normalized)
-    return has_role or has_user_contact
-
-
-def user_role_validation(rows: list[list[str]]) -> list[str]:
-    if not rows:
-        return ["No rows found."]
-
-    headers = [cell.strip() for cell in rows[0]]
-    if not looks_like_user_role_headers(headers):
-        return []
-
-    issues: list[str] = []
-    if headers[:2] != list(USER_ROLE_COLUMNS):
-        missing = [column for column in USER_ROLE_COLUMNS if column not in headers]
-        extra = [column for column in headers if column and column not in USER_ROLE_COLUMNS]
-        issues.append(f"Header mismatch. Expected: {', '.join(USER_ROLE_COLUMNS)}.")
-        if missing:
-            issues.append(f"Missing column(s): {', '.join(missing)}.")
-        if extra:
-            issues.append(f"Unexpected or misspelled column(s): {', '.join(extra)}.")
-
-    if not all(column in headers for column in USER_ROLE_COLUMNS):
-        return issues
-
-    contact_index = headers.index("User_contact_number")
-    role_index = headers.index("Role")
-    seen_contacts: dict[str, int] = {}
-    for row_number, row in enumerate(rows[1:], start=2):
-        if not any(cell.strip() for cell in row):
-            continue
-        contact = row[contact_index].strip() if contact_index < len(row) else ""
-        role = row[role_index].strip() if role_index < len(row) else ""
-        if not contact:
-            issues.append(f"Row {row_number}: User_contact_number is blank.")
-        elif not contact.isdigit():
-            issues.append(f"Row {row_number}: User_contact_number has non-digit data ({mask_value(contact)}).")
-        elif len(contact) != 10:
-            issues.append(
-                f"Row {row_number}: User_contact_number must be 10 digits, found {len(contact)} digits."
-            )
-        elif contact in seen_contacts:
-            issues.append(
-                f"Row {row_number}: duplicate User_contact_number already present in row {seen_contacts[contact]}."
-            )
-        elif contact:
-            seen_contacts[contact] = row_number
-
-        if not role:
-            issues.append(f"Row {row_number}: Role is blank.")
-        elif role not in USER_ROLE_VALUES:
-            issues.append(
-                f"Row {row_number}: Role must be FE, ADMIN, or AM. Found {role!r}."
-            )
-
-    return issues
-
-
-def csv_summary(path: Path) -> str:
-    text, encoding_status = decode_bytes(path.read_bytes())
-    return csv_summary_from_text(path.name, text, encoding_status)
-
-
-def csv_summary_from_text(file_name: str, text: str, encoding_status: str) -> str:
-    rows = csv_rows_from_text(text)
-    headers = rows[0] if rows else []
-    data_rows = [row for row in rows[1:] if any(cell.strip() for cell in row)]
-    issues = user_role_validation(rows)
-
-    lines = [
-        f"File: {file_name}",
-        "Detected type: CSV/text table",
-        f"Encoding: {encoding_status}",
-        f"Columns: {', '.join(headers) if headers else 'None detected'}",
-        f"Data rows: {len(data_rows)}",
-    ]
-    if issues:
-        lines.append("Validation findings:")
-        lines.extend(f"- {issue}" for issue in issues[:30])
-    else:
-        lines.append("Validation findings: No obvious CSV format issues found.")
-    return "\n".join(lines)
-
-
-def xlsx_shared_strings(zipped: zipfile.ZipFile) -> list[str]:
-    try:
-        root = ElementTree.fromstring(zipped.read("xl/sharedStrings.xml"))
-    except KeyError:
-        return []
-    namespace = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    strings: list[str] = []
-    for item in root.findall("a:si", namespace):
-        parts = [text.text or "" for text in item.findall(".//a:t", namespace)]
-        strings.append("".join(parts))
-    return strings
-
-
-def xlsx_first_sheet_rows(path: Path, max_rows: int = 80) -> list[list[str]]:
-    with zipfile.ZipFile(path) as zipped:
-        shared_strings = xlsx_shared_strings(zipped)
-        sheet_names = sorted(name for name in zipped.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name))
-        if not sheet_names:
-            return []
-        root = ElementTree.fromstring(zipped.read(sheet_names[0]))
-
-    namespace = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    rows: list[list[str]] = []
-    for row_node in root.findall(".//a:sheetData/a:row", namespace)[:max_rows]:
-        values: list[str] = []
-        for cell in row_node.findall("a:c", namespace):
-            value_node = cell.find("a:v", namespace)
-            raw_value = value_node.text if value_node is not None else ""
-            if cell.attrib.get("t") == "s" and raw_value.isdigit():
-                value = shared_strings[int(raw_value)] if int(raw_value) < len(shared_strings) else raw_value
-            else:
-                value = raw_value
-            values.append(value.strip())
-        rows.append(values)
-    return rows
-
-
-def xlsx_summary(path: Path) -> str:
-    try:
-        rows = xlsx_first_sheet_rows(path)
-    except Exception as error:
-        return "\n".join(
-            [
-                f"File: {path.name}",
-                "Detected type: Excel workbook",
-                f"Could not inspect workbook: {error}",
-            ]
-        )
-
-    headers = rows[0] if rows else []
-    data_rows = [row for row in rows[1:] if any(cell.strip() for cell in row)]
-    issues = user_role_validation(rows)
-    lines = [
-        f"File: {path.name}",
-        "Detected type: Excel workbook",
-        f"Columns from first sheet: {', '.join(headers) if headers else 'None detected'}",
-        f"Data rows inspected: {len(data_rows)}",
-    ]
-    if issues:
-        lines.append("Validation findings:")
-        lines.extend(f"- {issue}" for issue in issues[:30])
-    else:
-        lines.append("Validation findings: No obvious workbook format issues found.")
-    return "\n".join(lines)
-
-
-def upload_summary(path: Path) -> str:
-    suffix = path.suffix.lower()
-    data = path.read_bytes()
-    text, encoding_status = decode_bytes(data)
-
-    try:
-        rows = csv_rows_from_text(text)
-    except csv.Error:
-        rows = []
-
-    if suffix in {".csv", ".tsv"} or looks_like_csv_rows(rows):
-        return csv_summary(path)
-    if suffix == ".xlsx":
-        return xlsx_summary(path)
-    if suffix in {".txt", ".log", ".out", ".json", ".xml", ".yaml", ".yml"}:
-        preview = text[:3000]
-        return "\n".join(
-            [
-                f"File: {path.name}",
-                "Detected type: text file",
-                f"Encoding: {encoding_status}",
-                "Text preview:",
-                preview,
-            ]
-        )
-
-    printable = sum(1 for character in text[:2000] if character.isprintable() or character.isspace())
-    if text and printable / max(1, min(len(text), 2000)) > 0.85:
-        return "\n".join(
-            [
-                f"File: {path.name}",
-                "Detected type: text-like file",
-                f"Encoding: {encoding_status}",
-                "Text preview:",
-                text[:3000],
-            ]
-        )
-    return "\n".join(
-        [
-            f"File: {path.name}",
-            f"Detected type: unsupported binary or unknown format ({path.suffix or 'no extension'})",
-            f"Size: {len(data)} bytes",
-            "The app stored this file, but could not safely inspect its contents.",
-        ]
-    )
-
-
 def status_line(log_text: str) -> str:
     match = re.search(r"Finished:\s+(\w+)", log_text)
     return match.group(1) if match else "Unknown"
@@ -2550,6 +2341,13 @@ Focused Jenkins console log context:
 """
 
 
+def fill_unknown_job(explanation: str, detected_job_name: str) -> str:
+    # The model sometimes answers "Job: Unknown" even when the job is known.
+    if detected_job_name == "Unknown":
+        return explanation
+    return re.sub(r"(?im)^(Job:[ \t]*\n?[ \t]*)Unknown[ \t]*$", lambda match: match.group(1) + detected_job_name, explanation)
+
+
 def ask_ollama(file_name: str, log_text: str, job_hint: str = "", file_analysis: str = "") -> str:
     payload = {
         "model": OLLAMA_MODEL,
@@ -2563,15 +2361,24 @@ def ask_ollama(file_name: str, log_text: str, job_hint: str = "", file_analysis:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    return data["response"].strip()
+    if not OLLAMA_SLOTS.acquire(timeout=OLLAMA_QUEUE_WAIT_SECONDS):
+        raise RuntimeError("Ollama is busy with other uploads. Try again in a minute.")
+    try:
+        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    finally:
+        OLLAMA_SLOTS.release()
+    return fill_unknown_job(data["response"].strip(), job_name(log_text, job_hint))
 
 
 def process_log(path: Path, job_hint: str = "", support_path: Path | None = None) -> Path:
     log_text = read_text(path)
     detected_job_name = job_name(log_text, job_hint)
-    validation_report = validate_csv_against_reference(job_hint, support_path) if support_path is not None else None
+    validation_report = (
+        validate_csv_against_reference(job_hint, support_path)
+        if support_path is not None and valid_job_key(job_hint)
+        else None
+    )
     file_analysis = validation_report.prompt_summary() if validation_report is not None else ""
 
     should_assume_missing_input = (
@@ -2659,7 +2466,7 @@ def process_log(path: Path, job_hint: str = "", support_path: Path | None = None
 
     archive_path = ARCHIVE_DIR / path.name
     if archive_path.exists():
-        archive_path = ARCHIVE_DIR / f"{int(time.time())}-{path.name}"
+        archive_path = ARCHIVE_DIR / f"{uuid.uuid4().hex[:8]}-{path.name}"
     shutil.copy2(path, archive_path)
     return output_path
 
@@ -2996,13 +2803,68 @@ def result_files() -> list[Path]:
     return sorted(OUTPUT_DIR.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
-def output_field(path: Path, label: str) -> str:
+def output_header(path: Path) -> str:
+    with path.open("rb") as handle:
+        return handle.read(4096).decode("utf-8", errors="replace")
+
+
+def output_field(header: str, label: str) -> str:
     pattern = re.compile(rf"^{re.escape(label)}:\s*(.*)$", re.MULTILINE)
-    match = pattern.search(read_text(path))
+    match = pattern.search(header)
     return match.group(1).strip() if match else "Unknown"
 
 
+def remove_old_files() -> int:
+    if RETENTION_DAYS <= 0:
+        return 0
+    cutoff = time.time() - RETENTION_DAYS * 86400
+    removed = 0
+    for folder in (INPUT_DIR, SUPPORT_DIR, OUTPUT_DIR, ARCHIVE_DIR):
+        for path in folder.glob("*"):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def retention_loop() -> None:
+    while True:
+        removed = remove_old_files()
+        if removed:
+            print(f"Removed {removed} file(s) older than {RETENTION_DAYS} day(s).")
+        time.sleep(3600)
+
+
 class Handler(BaseHTTPRequestHandler):
+    timeout = REQUEST_TIMEOUT_SECONDS
+
+    def is_authorized(self) -> bool:
+        if not APP_ACCESS_TOKEN:
+            return True
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            _, _, password = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return False
+        return hmac.compare_digest(password.encode("utf-8"), APP_ACCESS_TOKEN.encode("utf-8"))
+
+    def require_auth(self) -> bool:
+        if self.is_authorized():
+            return True
+        content = b"Login required."
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Basic realm="Jenkins Log AI Explainer"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+        return False
+
     def send_html(self, title: str, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         content = render_page(title, body)
         self.send_response(status)
@@ -3013,6 +2875,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/healthz":
+            content = b"ok"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+        if not self.require_auth():
+            return
         if parsed.path == "/":
             self.home()
         elif parsed.path == "/results":
@@ -3098,9 +2970,10 @@ class Handler(BaseHTTPRequestHandler):
         rows = []
         for path in result_files():
             stat = path.stat()
-            detected_job_name = output_field(path, "Selected Jenkins job")
-            if detected_job_name == "Unknown":
-                detected_job_name = output_field(path, "Detected Jenkins job")
+            header = output_header(path)
+            detected_job_name = output_field(header, "Selected Jenkins job")
+            if detected_job_name in {"Unknown", ""}:
+                detected_job_name = output_field(header, "Detected Jenkins job")
             rows.append(
                 "<tr>"
                 f"<td><a href=\"/result/{quote(path.name)}\">{html.escape(path.name)}</a></td>"
@@ -3129,7 +3002,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_html("Not found", '<div class="panel error">Page not found.</div>', HTTPStatus.NOT_FOUND)
             return
 
-        length = int(self.headers.get("Content-Length", "0"))
+        if not self.require_auth():
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
         if length <= 0 or length > MAX_UPLOAD_BYTES:
             self.send_html("Upload error", '<div class="panel error">File is empty or too large.</div>', HTTPStatus.BAD_REQUEST)
             return
@@ -3195,6 +3074,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_dirs()
+    threading.Thread(target=retention_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Jenkins AI uploader running at http://{HOST}:{PORT}")
     server.serve_forever()

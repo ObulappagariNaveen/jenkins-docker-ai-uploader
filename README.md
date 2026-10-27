@@ -1,121 +1,109 @@
 # Jenkins Log AI Explainer Website
 
-This repository contains a small Docker website for explaining Jenkins failure logs in simple plain text.
+A small Docker website that explains Jenkins job failures in simple plain English.
 
-The current recommended setup is:
+- Docker runs the website and stores uploaded logs, input CSVs and generated explanations.
+- Ollama runs the AI model. The recommended setup uses the Ollama app on the Mac.
+- Jenkins itself is not changed.
 
-- Docker runs the website.
-- Docker stores uploaded Jenkins logs and generated output files.
-- The Ollama app on the Mac runs the AI model.
-- Jenkins itself is not changed, updated, or touched.
+For how the CSV checks and failure rules work, see `CURRENT_WORKFLOW.md`.
 
 ## What The Website Does
 
-1. Open the website.
-2. Upload a downloaded Jenkins `consoleText` log file, such as `.txt`, `.log`, or `.out`.
-3. The website stores the raw log inside Docker.
-4. The website sends the important error lines to Ollama.
-5. Ollama returns a plain-English failure explanation.
-6. The explanation is saved inside Docker and shown in the browser.
+1. Pick the Jenkins job from the dropdown.
+2. Upload the failed Jenkins `consoleText` log (`.txt`, `.log`, `.out`), the input CSV, or both.
+3. The website checks the CSV against `reference_formats/<job>/correct_input.csv`.
+4. Known failures are explained by built-in rules. Anything else is sent to Ollama.
+5. The explanation is saved inside Docker and shown in the browser.
 
 ## Files In This Repository
 
-- `app.py` - Python website and upload logic.
-- `Dockerfile` - Builds the website container.
-- `docker-compose.local-ollama.yml` - Recommended setup: Docker website plus local Mac Ollama.
-- `docker-compose.yml` - Full Docker setup with Ollama inside Docker. This exists, but on Mac it may be slower.
+- `app.py` - Python website, CSV checks and Ollama logic.
+- `reference_formats/` - The correct CSV format for each supported Jenkins job.
+- `watch_jenkins_failures.py` - Fetches failed builds from Jenkins and explains them (used by the Jenkins pipeline).
+- `watch_jenkins_failures_mac.py` - The same watcher for running on the Mac against the Docker website.
+- `jenkins_ai_failure_explainer_pipeline.groovy` - Jenkins pipeline that runs the watcher for the upstream job.
+- `check_jenkins_job_names.py` - Checks that the reference job names exist in Jenkins.
+- `Dockerfile`, `docker-entrypoint.sh` - Builds the website image.
+- `docker-compose.local-ollama.yml` - Recommended: Docker website plus the Mac's Ollama app.
+- `docker-compose.yml` - Website and Ollama both in Docker. Works, but slower on a Mac.
 - `Modelfile.jenkins-failure-explainer` - Custom Ollama model instructions.
-- `README_LOCAL_OLLAMA.txt` - Short runbook for the recommended setup.
-- `NEW_CHAT_HANDOFF.txt` - Text you can paste into a new Codex or ChatGPT chat.
+- `NEW_CHAT_HANDOFF.txt` - Text to paste into a new AI chat about this project.
 
 ## Required Software
 
-Install these before running:
-
 - Docker Desktop
-- Ollama app
+- Ollama app (for the recommended setup)
 
-## Create The Ollama Model
+## Recommended Setup: Local Mac Ollama
 
-Open Terminal from this repository folder:
-
-```bash
-cd /Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
-```
-
-Pull the base model:
+Create the model once:
 
 ```bash
+cd ~/jenkins-docker-ai-uploader
 ollama pull llama3.2:3b
-```
-
-Create the Jenkins explainer model:
-
-```bash
 ollama create jenkins-failure-explainer -f Modelfile.jenkins-failure-explainer
-```
-
-Check it:
-
-```bash
 ollama list
 ```
 
-You should see:
-
-```text
-jenkins-failure-explainer
-```
-
-## Start The Website
-
-```bash
-cd /Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
-docker compose -f docker-compose.local-ollama.yml up -d --no-build
-```
-
-If the image does not exist yet, run:
+Start the website. The code and reference formats are built into the image, so use `--build` after any change:
 
 ```bash
 docker compose -f docker-compose.local-ollama.yml up -d --build
 ```
 
-Open:
+Open `http://localhost:8081`. Colleagues on the same network can use `http://YOUR-MAC-IP:8081`.
 
-```text
-http://localhost:8081
+## Docker-Only Setup
+
+```bash
+docker compose up -d --build
+docker exec jenkins-ai-ollama ollama pull llama3.2:3b
 ```
 
-## Daily Use
+Open `http://localhost:8080`.
 
-1. Open a failed Jenkins build.
-2. Add `/consoleText` at the end of the build URL.
-3. Save the page as a `.txt` file.
-4. Open `http://localhost:8081`.
-5. Upload the saved Jenkins log file.
-6. Open the generated result from the website.
+## Settings
+
+Set these in your shell or in a `.env` file next to the compose file before `docker compose up`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `APP_ACCESS_TOKEN` | empty (off) | When set, the browser asks for a login. Any username works; the password is this value. |
+| `RETENTION_DAYS` | `0` (off) | When above 0, uploaded logs, CSVs and outputs older than this many days are deleted every hour. |
+| `OLLAMA_MODEL` | `jenkins-failure-explainer` (local) / `llama3.2:3b` (Docker-only) | Model used for explanations. |
+| `MAX_CONCURRENT_OLLAMA` | `2` | How many uploads can ask Ollama at the same time. Others wait up to `OLLAMA_QUEUE_WAIT_SECONDS` (60). |
+| `REQUEST_TIMEOUT_SECONDS` | `60` | Drops a browser connection that stops sending data. |
+
+Example `.env`:
+
+```text
+APP_ACCESS_TOKEN=choose-a-shared-password
+RETENTION_DAYS=30
+```
 
 ## Docker Storage
 
-Inside the website container, files are stored here:
+Inside the website container:
 
 ```text
-/data/input
-/data/output
-/data/archive
+/data/input     uploaded Jenkins logs
+/data/support   uploaded input CSVs
+/data/output    AI explanations
+/data/archive   archived copies of logs
 ```
 
-Check stored files:
+List stored files:
 
 ```bash
 docker exec jenkins-ai-web-local-ollama find /data -maxdepth 2 -type f -print
 ```
 
-Copy all stored files from Docker to the Mac:
+Copy everything to the Mac:
 
 ```bash
-mkdir -p /Users/obulappagari.naveen/Documents/Jenkins-ai-docker-local-ollama-export
-docker cp jenkins-ai-web-local-ollama:/data/. /Users/obulappagari.naveen/Documents/Jenkins-ai-docker-local-ollama-export/
+mkdir -p ~/Documents/Jenkins-ai-docker-export
+docker cp jenkins-ai-web-local-ollama:/data/. ~/Documents/Jenkins-ai-docker-export/
 ```
 
 ## Stop The Website
@@ -124,34 +112,18 @@ docker cp jenkins-ai-web-local-ollama:/data/. /Users/obulappagari.naveen/Documen
 docker compose -f docker-compose.local-ollama.yml down
 ```
 
-This does not delete Docker volume data.
+This keeps the stored data. `down -v` deletes the Docker volume with all uploaded logs and outputs, so only run it on purpose.
 
-Do not run this unless you intentionally want to delete the uploaded logs and outputs:
+## Health Check
+
+The container reports healthy when `http://localhost:8081/healthz` answers `ok`. This page never needs a login.
 
 ```bash
-docker compose -f docker-compose.local-ollama.yml down -v
+docker ps --format '{{.Names}} {{.Status}}'
 ```
 
-## Current Verified Test
+## Notes
 
-This was tested with Jenkins log `#46.txt`.
-
-The system correctly detected the failure as:
-
-```text
-CSV/input file encoding issue
-```
-
-The evidence was:
-
-```text
-UnicodeDecodeError: 'utf-8' codec can't decode byte 0xca
-```
-
-## Important Notes
-
-- This website does not change Jenkins.
-- This website does not need Jenkins admin access.
-- This website does not automatically fetch from Jenkins yet.
-- Current flow needs a downloaded Jenkins `consoleText` file.
+- This website does not change Jenkins and does not need Jenkins admin access.
 - The local Mac Ollama setup is recommended because Docker-only Ollama was slower and timed out during testing.
+- The website runs as a non-root user inside the container. On first start it takes ownership of an older `/data` volume.

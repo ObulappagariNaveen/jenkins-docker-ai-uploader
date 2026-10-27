@@ -19,7 +19,8 @@ import app
 
 DEFAULT_JENKINS_BASE_URL = "https://jenkins.prd.valmo.in/job/support/job/log10/job/Regular_tasks"
 DEFAULT_CONTAINER = "jenkins-ai-web-local-ollama"
-STATE_PATH = Path("jenkins-watcher-mac-state.json")
+SCRIPT_DIR = Path(__file__).resolve().parent
+STATE_PATH = SCRIPT_DIR / "jenkins-watcher-mac-state.json"
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -34,7 +35,7 @@ def require_credentials() -> tuple[str, str]:
     return user, token
 
 
-def curl_text(url: str, *, user: str, token: str, timeout: int) -> str:
+def curl_bytes(url: str, *, user: str, token: str, timeout: int) -> bytes:
     with tempfile.NamedTemporaryFile("w", delete=False) as config:
         config.write("user = \"" + user.replace('"', '\\"') + ":" + token.replace('"', '\\"') + "\"\n")
         config.write(f"connect-timeout = {timeout}\n")
@@ -42,8 +43,7 @@ def curl_text(url: str, *, user: str, token: str, timeout: int) -> str:
         config_path = Path(config.name)
     try:
         result = subprocess.run(
-            ["curl", "--http1.1", "--fail", "--silent", "--show-error", "--config", str(config_path), url],
-            text=True,
+            ["curl", "--http1.1", "--fail", "--silent", "--show-error", "--globoff", "--config", str(config_path), url],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -55,26 +55,33 @@ def curl_text(url: str, *, user: str, token: str, timeout: int) -> str:
             pass
 
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"curl failed with exit code {result.returncode}")
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(error or f"curl failed with exit code {result.returncode}")
     return result.stdout
 
 
-def docker_run(args: list[str], *, input_text: str | None = None) -> str:
+def curl_text(url: str, *, user: str, token: str, timeout: int) -> str:
+    return curl_bytes(url, user=user, token=token, timeout=timeout).decode("utf-8", errors="replace")
+
+
+def docker_run(args: list[str], *, input_text: str | bytes | None = None) -> str:
+    if isinstance(input_text, str):
+        input_text = input_text.encode("utf-8")
     result = subprocess.run(
         ["docker", *args],
         input=input_text,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"docker failed with exit code {result.returncode}")
-    return result.stdout.strip()
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(error or f"docker failed with exit code {result.returncode}")
+    return result.stdout.decode("utf-8", errors="replace").strip()
 
 
 def reference_jobs() -> list[str]:
-    root = Path("reference_formats")
+    root = SCRIPT_DIR / "reference_formats"
     return sorted(
         path.name for path in root.iterdir() if path.is_dir() and (path / "correct_input.csv").exists()
     )
@@ -160,25 +167,25 @@ def fetch_input_parameter_csv(
     user: str,
     token: str,
     timeout: int,
-) -> tuple[str, str] | None:
+) -> tuple[str, bytes] | None:
     parameters_url = f"{build_url.rstrip('/')}/parameters/"
     parameters_html = curl_text(parameters_url, user=user, token=token, timeout=timeout)
     links = input_parameter_links(parameters_html, parameters_url)
     if not links:
         return None
     file_name, download_url = links[0]
-    return file_name, curl_text(download_url, user=user, token=token, timeout=timeout)
+    return file_name, curl_bytes(download_url, user=user, token=token, timeout=timeout)
 
 
-def input_csv_has_validation_issues(job_name: str, input_csv: tuple[str, str] | None) -> bool:
+def input_csv_has_validation_issues(job_name: str, input_csv: tuple[str, bytes] | None) -> bool:
     if input_csv is None:
         return False
 
-    _, csv_text = input_csv
+    _, csv_bytes = input_csv
     temp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8", newline="") as handle:
-            handle.write(csv_text)
+        with tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False) as handle:
+            handle.write(csv_bytes)
             temp_path = Path(handle.name)
         report = app.validate_csv_against_reference(job_name, temp_path)
         return report.has_issues
@@ -198,7 +205,7 @@ def create_explanation_in_container(
     job_name: str,
     build_number: int,
     log_text: str,
-    input_csv: tuple[str, str] | None = None,
+    input_csv: tuple[str, bytes] | None = None,
 ) -> str:
     log_name = safe_log_name(job_name, build_number)
     docker_path = f"/data/input/{log_name}"
@@ -206,10 +213,10 @@ def create_explanation_in_container(
 
     support_path = None
     if input_csv is not None:
-        file_name, csv_text = input_csv
+        file_name, csv_bytes = input_csv
         support_name = safe_support_name(job_name, build_number, file_name)
         support_path = f"/data/support/{support_name}"
-        docker_run(["exec", "-i", container, "sh", "-c", f"cat > {support_path}"], input_text=csv_text)
+        docker_run(["exec", "-i", container, "sh", "-c", f"cat > {support_path}"], input_text=csv_bytes)
 
     support_arg = "None" if support_path is None else f"Path({support_path!r})"
     command = (

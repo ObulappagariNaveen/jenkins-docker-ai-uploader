@@ -1,21 +1,31 @@
 services:
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.23.4
     container_name: jenkins-ai-ollama
     restart: unless-stopped
     volumes:
       - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
   web:
+    image: jenkins-docker-ai-uploader-web:latest
     build: .
     container_name: jenkins-ai-web
     restart: unless-stopped
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     environment:
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: llama3.2:3b
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      OLLAMA_TIMEOUT_SECONDS: "300"
       DATA_DIR: /data
+      APP_ACCESS_TOKEN: ${APP_ACCESS_TOKEN:-}
+      RETENTION_DAYS: ${RETENTION_DAYS:-0}
     ports:
       - "8080:8080"
     volumes:

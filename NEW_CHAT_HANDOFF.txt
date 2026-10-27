@@ -2,7 +2,7 @@ Paste this into a new Codex or ChatGPT chat:
 
 I have a local repository for a Jenkins Log AI Explainer website at:
 
-/Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
+~/jenkins-docker-ai-uploader (a clone of https://github.com/ObulappagariNaveen/jenkins-docker-ai-uploader)
 
 Goal:
 I want to explain downloaded Jenkins failure logs in simple plain text for new colleagues.
@@ -30,9 +30,9 @@ Main files:
 
 How to start:
 
-cd /Users/obulappagari.naveen/Documents/Codex/2026-05-10/files-mentioned-by-the-user-jenkins/jenkins-docker-ai-uploader
+cd ~/jenkins-docker-ai-uploader
 ollama list
-docker compose -f docker-compose.local-ollama.yml up -d --no-build
+docker compose -f docker-compose.local-ollama.yml up -d --build
 
 If the Docker image is missing:
 
